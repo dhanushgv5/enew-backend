@@ -1,0 +1,260 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  SELLER
+  DELIVERY_BOY
+  CUSTOMER
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  PROCESSING
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum ReturnType {
+  RETURN
+  REPLACEMENT
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PICKUP_SCHEDULED
+  PICKED_UP
+  RECEIVED
+  REFUNDED
+  REPLACED
+  CANCELLED
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String
+  firstName     String?
+  lastName      String?
+  phone         String?
+  role          Role           @default(CUSTOMER)
+  isActive      Boolean        @default(true)
+  refreshToken  String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  cart          Cart?
+  orders        Order[]
+  reviews       Review[]
+  addresses     Address[]
+  deliveries    Order[]        @relation("DeliveryAssignments")
+  returnRequests ReturnRequest[]
+  returnPickups  ReturnRequest[] @relation("ReturnPickups")
+
+  @@map("users")
+}
+
+model Category {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  imageUrl    String?
+  products    Product[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("categories")
+}
+
+model Product {
+  id          String      @id @default(uuid())
+  name        String
+  slug        String      @unique
+  description String?
+  price       Decimal     @db.Decimal(10, 2)
+  compareAtPrice Decimal? @db.Decimal(10, 2)
+  sku         String      @unique
+  stock       Int         @default(0)
+  reservedStock Int       @default(0)
+  isActive    Boolean     @default(true)
+  images      String[]
+  categoryId  String
+  category    Category    @relation(fields: [categoryId], references: [id])
+  cartItems   CartItem[]
+  orderItems  OrderItem[]
+  reviews     Review[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([categoryId])
+  @@index([isActive])
+  @@map("products")
+}
+
+model Cart {
+  id        String     @id @default(uuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+
+  @@map("carts")
+}
+
+model CartItem {
+  id        String  @id @default(uuid())
+  cartId    String
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int     @default(1)
+  price     Decimal @db.Decimal(10, 2) // snapshot price
+
+  @@unique([cartId, productId])
+  @@map("cart_items")
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  orderNumber     String      @unique
+  userId          String
+  user            User        @relation(fields: [userId], references: [id])
+  status          OrderStatus @default(PENDING)
+  subtotal        Decimal     @db.Decimal(10, 2)
+  tax             Decimal     @db.Decimal(10, 2) @default(0)
+  shipping        Decimal     @db.Decimal(10, 2) @default(0)
+  total           Decimal     @db.Decimal(10, 2)
+  shippingAddress Json
+  billingAddress  Json?
+  paymentIntentId String?
+  deliveryBoyId   String?
+  deliveryBoy     User?       @relation("DeliveryAssignments", fields: [deliveryBoyId], references: [id])
+  items           OrderItem[]
+  statusHistory   OrderStatusHistory[]
+  returnRequests  ReturnRequest[]
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  // Set the moment the order reaches DELIVERED - anchors the return/replace window.
+  deliveredAt     DateTime?
+
+  @@index([userId])
+  @@index([status])
+  @@index([deliveryBoyId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  price     Decimal @db.Decimal(10, 2) // price at time of order
+  name      String  // snapshot
+  returnRequests ReturnRequest[]
+
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@map("order_status_history")
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  rating    Int
+  title     String?
+  comment   String?
+  photos    String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@index([productId])
+  @@map("reviews")
+}
+
+model Address {
+  id         String  @id @default(uuid())
+  userId     String
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String?
+  firstName  String
+  lastName   String
+  street     String
+  city       String
+  state      String
+  postalCode String
+  country    String
+  phone      String?
+  isDefault  Boolean @default(false)
+
+  @@map("addresses")
+}
+
+model ReturnRequest {
+  id            String       @id @default(uuid())
+  orderId       String
+  order         Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItemId   String
+  orderItem     OrderItem    @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type          ReturnType
+  quantity      Int
+  reason        String
+  description   String?
+  photos        String[]     @default([])
+  status        ReturnStatus @default(REQUESTED)
+  adminNote     String?
+  refundAmount  Decimal?     @db.Decimal(10, 2)
+  // Set together when admin schedules the pickup (APPROVED -> PICKUP_SCHEDULED)
+  pickupDate    DateTime?
+  deliveryBoyId String?
+  deliveryBoy   User?        @relation("ReturnPickups", fields: [deliveryBoyId], references: [id], onDelete: SetNull)
+  statusHistory ReturnStatusHistory[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([orderId])
+  @@index([userId])
+  @@index([status])
+  @@index([deliveryBoyId])
+  @@map("return_requests")
+}
+
+model ReturnStatusHistory {
+  id        String        @id @default(uuid())
+  returnId  String
+  return    ReturnRequest @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  status    ReturnStatus
+  note      String?
+  createdAt DateTime      @default(now())
+
+  @@map("return_status_history")
+}
