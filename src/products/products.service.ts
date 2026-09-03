@@ -47,7 +47,23 @@ export class ProductsService {
           { description: { contains: query.search, mode: 'insensitive' } },
         ],
       }),
+      ...((query.minPrice !== undefined || query.maxPrice !== undefined) && {
+        price: {
+          ...(query.minPrice !== undefined && { gte: new Prisma.Decimal(query.minPrice) }),
+          ...(query.maxPrice !== undefined && { lte: new Prisma.Decimal(query.maxPrice) }),
+        },
+      }),
+      ...(query.inStock && { stock: { gt: 0 } }),
     };
+
+    const ORDER_BY: Record<string, Prisma.ProductOrderByWithRelationInput> = {
+      newest: { createdAt: 'desc' },
+      price_asc: { price: 'asc' },
+      price_desc: { price: 'desc' },
+      name_asc: { name: 'asc' },
+      name_desc: { name: 'desc' },
+    };
+    const orderBy = ORDER_BY[query.sort || 'newest'];
 
     const [items, total] = await Promise.all([
       this.prisma.product.findMany({
@@ -55,7 +71,7 @@ export class ProductsService {
         include: { category: { select: { id: true, name: true, slug: true } } },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy,
       }),
       this.prisma.product.count({ where }),
     ]);

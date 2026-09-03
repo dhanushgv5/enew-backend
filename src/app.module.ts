@@ -12,6 +12,8 @@ import { OrdersModule } from './orders/orders.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { ReturnsModule } from './returns/returns.module';
+import { WishlistModule } from './wishlist/wishlist.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { WebsocketModule } from './websocket/websocket.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
@@ -29,6 +31,8 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     AddressesModule,
     ReviewsModule,
     ReturnsModule,
+    WishlistModule,
+    DashboardModule,
     WebsocketModule,
   ],
   providers: [

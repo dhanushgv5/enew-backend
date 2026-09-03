@@ -137,15 +137,31 @@ export class ReturnsService {
   }
 
   async findAllAdmin(query: QueryReturnsDto) {
-    return this.prisma.returnRequest.findMany({
-      where: {
-        ...(query.status && { status: query.status }),
-        ...(query.type && { type: query.type }),
-        ...(query.orderId && { orderId: query.orderId }),
-      },
-      include: ORDER_ITEM_INCLUDE,
-      orderBy: { createdAt: 'desc' },
-    });
+    const page = query.page || 1;
+    const limit = Math.min(query.limit || 20, 100);
+    const skip = (page - 1) * limit;
+
+    const where = {
+      ...(query.status && { status: query.status }),
+      ...(query.type && { type: query.type }),
+      ...(query.orderId && { orderId: query.orderId }),
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.returnRequest.findMany({
+        where,
+        include: ORDER_ITEM_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.returnRequest.count({ where }),
+    ]);
+
+    return {
+      items,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   async findOne(id: string, userId: string, role: Role) {

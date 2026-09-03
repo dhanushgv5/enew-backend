@@ -5,6 +5,7 @@ import {
   Patch,
   Body,
   Param,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
@@ -41,8 +42,11 @@ export class OrdersController {
   @Get('admin/all')
   @UseGuards(RolesGuard)
   @Roles(Role.ADMIN, Role.SUPER_ADMIN)
-  findAllAdmin() {
-    return this.ordersService.findAllAdmin();
+  findAllAdmin(@Query('page') page?: string, @Query('limit') limit?: string) {
+    return this.ordersService.findAllAdmin(
+      page ? Number(page) : undefined,
+      limit ? Number(limit) : undefined,
+    );
   }
 
   // Delivery boy views orders assigned to them

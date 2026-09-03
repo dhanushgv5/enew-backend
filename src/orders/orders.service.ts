@@ -350,16 +350,26 @@ export class OrdersService {
     return updated;
   }
 
-  async findAllAdmin() {
-    return this.prisma.order.findMany({
-      include: {
-        user: { select: { email: true, firstName: true } },
-        deliveryBoy: { select: { id: true, email: true, firstName: true, lastName: true } },
-        items: true,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
+  async findAllAdmin(page = 1, limit = 50) {
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      this.prisma.order.findMany({
+        include: {
+          user: { select: { email: true, firstName: true } },
+          deliveryBoy: { select: { id: true, email: true, firstName: true, lastName: true } },
+          items: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.order.count(),
+    ]);
+
+    return {
+      items,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   /**

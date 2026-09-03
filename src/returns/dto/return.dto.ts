@@ -104,4 +104,12 @@ export class QueryReturnsDto {
   @IsOptional()
   @IsUUID()
   orderId?: string;
+
+  @IsOptional()
+  @IsNumber()
+  page?: number = 1;
+
+  @IsOptional()
+  @IsNumber()
+  limit?: number = 20;
 }

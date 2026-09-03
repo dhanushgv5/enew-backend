@@ -62,6 +62,7 @@ model User {
   deliveries    Order[]        @relation("DeliveryAssignments")
   returnRequests ReturnRequest[]
   returnPickups  ReturnRequest[] @relation("ReturnPickups")
+  wishlist       WishlistItem[]
 
   @@map("users")
 }
@@ -96,6 +97,7 @@ model Product {
   cartItems   CartItem[]
   orderItems  OrderItem[]
   reviews     Review[]
+  wishlistedBy WishlistItem[]
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
@@ -257,4 +259,17 @@ model ReturnStatusHistory {
   createdAt DateTime      @default(now())
 
   @@map("return_status_history")
+}
+
+model WishlistItem {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@index([userId])
+  @@map("wishlist_items")
 }
