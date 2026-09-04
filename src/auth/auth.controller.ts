@@ -79,7 +79,12 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async logout(@CurrentUser('id') userId: string, @Res({ passthrough: true }) res: Response) {
     await this.authService.logout(userId);
-    res.clearCookie('refreshToken');
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/api/auth',
+    });
     return { message: 'Logged out successfully' };
   }
 
@@ -87,7 +92,13 @@ export class AuthController {
     res.cookie('refreshToken', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      // 'none' is required for the cookie to survive a cross-site request
+      // (Vercel frontend -> Railway backend are different domains), but
+      // 'none' cookies are rejected by browsers unless secure is also true —
+      // so this only takes effect in production over https, matching the
+      // secure flag above. Locally (http, same-origin-ish via proxy) we
+      // fall back to 'lax' since 'none' would just get dropped anyway.
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/api/auth',
     });
