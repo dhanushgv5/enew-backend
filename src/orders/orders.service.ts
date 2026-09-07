@@ -8,9 +8,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
 import { CartService } from '../cart/cart.service';
 import { EventsGateway } from '../websocket/events.gateway';
-import { CreateOrderDto, UpdateOrderAddressDto, UpdateOrderStatusDto } from './dto/order.dto';
+import { CreateOrderDto, UpdateOrderAddressDto, UpdateOrderStatusDto, VerifyRazorpayPaymentDto } from './dto/order.dto';
 import { OrderStatus, Prisma, Role } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
+import Razorpay from 'razorpay';
+import * as crypto from 'crypto';
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   PENDING: [OrderStatus.PAID, OrderStatus.CANCELLED],
@@ -51,12 +53,30 @@ const ADDRESS_EDITABLE_STATUSES: OrderStatus[] = [
 
 @Injectable()
 export class OrdersService {
+  // Constructed lazily on first use rather than as a class field, so a
+  // missing RAZORPAY_KEY_ID/SECRET only breaks payment endpoints, not the
+  // whole module (createFromCart etc. still work without keys set).
+  private razorpay: Razorpay | null = null;
+
   constructor(
     private prisma: PrismaService,
     private productsService: ProductsService,
     private cartService: CartService,
     private eventsGateway: EventsGateway,
   ) {}
+
+  private getRazorpay(): Razorpay {
+    if (!this.razorpay) {
+      if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+        throw new BadRequestException('Razorpay is not configured on the server');
+      }
+      this.razorpay = new Razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET,
+      });
+    }
+    return this.razorpay;
+  }
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
     const cart = await this.cartService.getCart(userId);
@@ -188,7 +208,88 @@ export class OrdersService {
         },
         include: { items: true, statusHistory: true },
       });
+    }).then((updated) => {
+      // markAsPaid previously updated the DB silently - push it live too,
+      // same as updateShippingAddress does, so the order page and admin
+      // console update without a manual refresh.
+      this.eventsGateway.emitOrderUpdate(updated.userId, updated);
+      return updated;
     });
+  }
+
+  /**
+   * Step 1 of customer checkout: create a Razorpay order for an existing
+   * PENDING order and hand the frontend what it needs to open Checkout.js.
+   */
+  async createRazorpayOrder(orderId: string, userId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.status !== OrderStatus.PENDING) {
+      throw new BadRequestException('Order is not payable in its current state');
+    }
+
+    // amount in paise
+    const amountPaise = Math.round(Number(order.total) * 100);
+
+    const rzpOrder = await this.getRazorpay().orders.create({
+      amount: amountPaise,
+      currency: 'INR',
+      receipt: order.orderNumber,
+      notes: { orderId: order.id, userId },
+    });
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { razorpayOrderId: rzpOrder.id },
+    });
+
+    return {
+      razorpayOrderId: rzpOrder.id,
+      amount: amountPaise,
+      currency: 'INR',
+      keyId: process.env.RAZORPAY_KEY_ID,
+    };
+  }
+
+  /**
+   * Step 2: verify the signature Checkout.js's success handler returns,
+   * then confirm the order the same way markAsPaid does (stock reserved
+   * -> sold, status PENDING -> PAID).
+   */
+  async verifyRazorpayPayment(orderId: string, userId: string, dto: VerifyRazorpayPaymentDto) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.razorpayOrderId || order.razorpayOrderId !== dto.razorpayOrderId) {
+      throw new BadRequestException('Razorpay order mismatch');
+    }
+    if (order.status !== OrderStatus.PENDING) {
+      throw new BadRequestException('Order is not in PENDING state');
+    }
+
+    const body = `${dto.razorpayOrderId}|${dto.razorpayPaymentId}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET!)
+      .update(body)
+      .digest('hex');
+
+    if (expectedSignature !== dto.razorpaySignature) {
+      throw new BadRequestException('Payment signature verification failed');
+    }
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: {
+        razorpayPaymentId: dto.razorpayPaymentId,
+        razorpaySignature: dto.razorpaySignature,
+      },
+    });
+
+    // Reuses the existing stock-confirm + status-transition + live-update logic.
+    return this.markAsPaid(order.id, dto.razorpayPaymentId);
   }
 
   async updateStatus(

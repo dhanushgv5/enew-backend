@@ -40,13 +40,13 @@ export class ReviewsController {
     FilesInterceptor('photos', MAX_PHOTOS_PER_UPLOAD, {
       storage: diskStorage({
         destination: './uploads/reviews',
-        filename: (_req, file: any, cb) => {
+        filename: (_req: Express.Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
           const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
           cb(null, `${unique}${extname(file.originalname)}`);
         },
       }),
       limits: { fileSize: MAX_PHOTO_SIZE_BYTES },
-      fileFilter: (_req, file: any, cb) => {
+      fileFilter: (_req: Express.Request, file: Express.Multer.File, cb: (error: Error | null, acceptFile: boolean) => void) => {
         if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
           cb(new BadRequestException('Only JPEG, PNG, or WEBP images are allowed'), false);
           return;

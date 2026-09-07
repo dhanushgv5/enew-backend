@@ -142,6 +142,9 @@ model Order {
   shippingAddress Json
   billingAddress  Json?
   paymentIntentId String?
+  razorpayOrderId   String?  @unique
+  razorpayPaymentId String?
+  razorpaySignature String?
   deliveryBoyId   String?
   deliveryBoy     User?       @relation("DeliveryAssignments", fields: [deliveryBoyId], references: [id])
   items           OrderItem[]

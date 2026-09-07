@@ -9,7 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
-import { CreateOrderDto, UpdateOrderAddressDto, UpdateOrderStatusDto, AssignDeliveryDto, UpdateDeliveryStatusDto } from './dto/order.dto';
+import { CreateOrderDto, UpdateOrderAddressDto, UpdateOrderStatusDto, AssignDeliveryDto, UpdateDeliveryStatusDto, VerifyRazorpayPaymentDto } from './dto/order.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -119,5 +119,25 @@ export class OrdersController {
       id,
       `pi_simulated_${Date.now()}`,
     );
+  }
+
+  // Customer checkout step 1: create a Razorpay order for their own PENDING order
+  @Post(':id/razorpay/order')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CUSTOMER)
+  createRazorpayOrder(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.ordersService.createRazorpayOrder(id, userId);
+  }
+
+  // Customer checkout step 2: verify Checkout.js's response and confirm the order
+  @Post(':id/razorpay/verify')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CUSTOMER)
+  verifyRazorpayPayment(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+    @Body() dto: VerifyRazorpayPaymentDto,
+  ) {
+    return this.ordersService.verifyRazorpayPayment(id, userId, dto);
   }
 }

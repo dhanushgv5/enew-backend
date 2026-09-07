@@ -52,3 +52,14 @@ export class UpdateDeliveryStatusDto {
   @IsIn(['OUT_FOR_DELIVERY', 'DELIVERED'])
   status: 'OUT_FOR_DELIVERY' | 'DELIVERED';
 }
+
+export class VerifyRazorpayPaymentDto {
+  @IsString()
+  razorpayOrderId: string;
+
+  @IsString()
+  razorpayPaymentId: string;
+
+  @IsString()
+  razorpaySignature: string;
+}
