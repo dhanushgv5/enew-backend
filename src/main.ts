@@ -42,7 +42,11 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
 
   const port = configService.get('PORT') || 4000;
-  await app.listen(port);
+  // Railway's proxy needs the app bound to all interfaces (0.0.0.0), not
+  // just localhost -- without this, the container shows "Running" but the
+  // proxy can never actually reach the process, producing a 502 on every
+  // request even though nothing is wrong with the app itself.
+  await app.listen(port, '0.0.0.0');
   logger.log(`🚀 Server running on http://localhost:${port}/api`);
 }
 bootstrap();
