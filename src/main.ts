@@ -4,12 +4,13 @@ import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';          // ← fixed
 import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
 
@@ -18,6 +19,23 @@ async function bootstrap() {
   // different origin) from loading review photos served below, so relax it.
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(cookieParser());
+
+  // The Razorpay webhook needs the exact raw request bytes to verify the
+  // HMAC signature - the global JSON parser below would consume and
+  // reserialize the body, which can produce a byte-for-byte different
+  // string and make every signature check fail. So: raw-body parsing for
+  // that one route (registered first, matched by exact path), JSON/
+  // urlencoded parsing for everything else (skips that same path).
+  const WEBHOOK_PATH = '/api/orders/razorpay/webhook';
+  app.use(WEBHOOK_PATH, express.raw({ type: '*/*' }));
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.originalUrl === WEBHOOK_PATH) return next();
+    express.json()(req, res, next);
+  });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.originalUrl === WEBHOOK_PATH) return next();
+    express.urlencoded({ extended: true })(req, res, next);
+  });
 
   // Serve uploaded review photos (e.g. /uploads/reviews/xyz.jpg)
   app.use('/uploads', express.static(join(process.cwd(), 'uploads')));

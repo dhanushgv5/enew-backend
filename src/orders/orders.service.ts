@@ -15,7 +15,13 @@ import Razorpay from 'razorpay';
 import * as crypto from 'crypto';
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: [OrderStatus.PAID, OrderStatus.CANCELLED],
+  // PAID is intentionally not reachable from here - the only paths into
+  // PAID are markAsPaid (via the admin /pay simulate endpoint, the customer
+  // /razorpay/verify endpoint, or the Razorpay webhook), all of which run
+  // the stock-confirm logic (reserved -> sold) that this generic transition
+  // does not. Allowing PENDING -> PAID here would let an order become PAID
+  // without ever releasing/confirming its reserved stock.
+  PENDING: [OrderStatus.CANCELLED],
   PAID: [OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
   PROCESSING: [OrderStatus.SHIPPED, OrderStatus.CANCELLED],
   SHIPPED: [OrderStatus.OUT_FOR_DELIVERY, OrderStatus.CANCELLED],
@@ -101,11 +107,17 @@ export class OrdersService {
 
     // Transaction: reserve stock + create order
     const order = await this.prisma.$transaction(async (tx) => {
-      // Reserve stock for all items
+      // Reserve stock for all items. SELECT ... FOR UPDATE locks each
+      // product row for the rest of this transaction, so a concurrent
+      // request reserving the same product blocks here until this
+      // transaction commits (or rolls back) instead of reading a stale
+      // stock/reservedStock pair - without this lock, two requests can
+      // both read "1 available" for the last unit and both reserve it.
       for (const item of cart.items) {
-        const product = await tx.product.findUnique({
-          where: { id: item.productId },
-        });
+        const rows = await tx.$queryRaw<
+          { id: string; name: string; stock: number; reservedStock: number }[]
+        >`SELECT id, name, stock, "reservedStock" FROM products WHERE id = ${item.productId} FOR UPDATE`;
+        const product = rows[0];
         if (!product) throw new NotFoundException('Product missing');
 
         const available = product.stock - product.reservedStock;
@@ -168,22 +180,45 @@ export class OrdersService {
   }
 
   /**
-   * Mark order as paid (called after payment webhook in real app)
-   * Confirms stock (moves from reserved to sold)
+   * Mark order as paid - called from the customer's /verify request and
+   * from the Razorpay webhook, whichever gets there first.
+   * Confirms stock (moves from reserved to sold).
+   *
+   * The PENDING -> PAID transition is claimed atomically via updateMany's
+   * WHERE clause (id + status=PENDING) before any stock is touched: if a
+   * concurrent call already claimed it, this update matches zero rows and
+   * we stop immediately, rather than racing another call to decrement the
+   * same stock twice.
    */
-  async markAsPaid(orderId: string, paymentIntentId?: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({
+  async markAsPaid(
+    orderId: string,
+    paymentIntentId?: string,
+    razorpayPaymentId?: string,
+    razorpaySignature?: string,
+  ) {
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.order.updateMany({
+        where: { id: orderId, status: OrderStatus.PENDING },
+        data: {
+          status: OrderStatus.PAID,
+          paymentIntentId,
+          ...(razorpayPaymentId && { razorpayPaymentId }),
+          ...(razorpaySignature && { razorpaySignature }),
+        },
+      });
+
+      if (claim.count === 0) {
+        const existing = await tx.order.findUnique({ where: { id: orderId } });
+        if (!existing) throw new NotFoundException('Order not found');
+        throw new BadRequestException('Order is not in PENDING state');
+      }
+
+      const order = await tx.order.findUniqueOrThrow({
         where: { id: orderId },
         include: { items: true },
       });
 
-      if (!order) throw new NotFoundException('Order not found');
-      if (order.status !== OrderStatus.PENDING) {
-        throw new BadRequestException('Order is not in PENDING state');
-      }
-
-      // Confirm stock
+      // Confirm stock now that we've atomically won the PENDING -> PAID claim.
       for (const item of order.items) {
         await tx.product.update({
           where: { id: item.productId },
@@ -197,8 +232,6 @@ export class OrdersService {
       return tx.order.update({
         where: { id: orderId },
         data: {
-          status: OrderStatus.PAID,
-          paymentIntentId,
           statusHistory: {
             create: {
               status: OrderStatus.PAID,
@@ -208,13 +241,13 @@ export class OrdersService {
         },
         include: { items: true, statusHistory: true },
       });
-    }).then((updated) => {
-      // markAsPaid previously updated the DB silently - push it live too,
-      // same as updateShippingAddress does, so the order page and admin
-      // console update without a manual refresh.
-      this.eventsGateway.emitOrderUpdate(updated.userId, updated);
-      return updated;
     });
+
+    // markAsPaid previously updated the DB silently - push it live too,
+    // same as updateShippingAddress does, so the order page and admin
+    // console update without a manual refresh.
+    this.eventsGateway.emitOrderUpdate(updated.userId, updated);
+    return updated;
   }
 
   /**
@@ -232,6 +265,28 @@ export class OrdersService {
 
     // amount in paise
     const amountPaise = Math.round(Number(order.total) * 100);
+
+    // Idempotency: if we already created a Razorpay order for this order
+    // (e.g. the customer clicked "Pay now" again, or has two tabs open),
+    // reuse it instead of minting a new one. Otherwise a second call here
+    // overwrites razorpayOrderId, and if the customer completes payment on
+    // the *first* checkout window, verifyRazorpayPayment's mismatch check
+    // rejects that legitimate payment.
+    if (order.razorpayOrderId) {
+      try {
+        const existing = await this.getRazorpay().orders.fetch(order.razorpayOrderId);
+        if (existing && existing.status !== 'paid') {
+          return {
+            razorpayOrderId: existing.id,
+            amount: existing.amount,
+            currency: existing.currency,
+            keyId: process.env.RAZORPAY_KEY_ID,
+          };
+        }
+      } catch {
+        // Stale/expired id on Razorpay's side - fall through and create a fresh one.
+      }
+    }
 
     const rzpOrder = await this.getRazorpay().orders.create({
       amount: amountPaise,
@@ -256,7 +311,10 @@ export class OrdersService {
   /**
    * Step 2: verify the signature Checkout.js's success handler returns,
    * then confirm the order the same way markAsPaid does (stock reserved
-   * -> sold, status PENDING -> PAID).
+   * -> sold, status PENDING -> PAID). The razorpayPaymentId/Signature are
+   * written atomically as part of markAsPaid's guarded transaction rather
+   * than in a separate call, so a concurrent duplicate /verify can't slip
+   * a write in between the check and the claim.
    */
   async verifyRazorpayPayment(orderId: string, userId: string, dto: VerifyRazorpayPaymentDto) {
     const order = await this.prisma.order.findFirst({
@@ -280,16 +338,75 @@ export class OrdersService {
       throw new BadRequestException('Payment signature verification failed');
     }
 
-    await this.prisma.order.update({
-      where: { id: order.id },
-      data: {
-        razorpayPaymentId: dto.razorpayPaymentId,
-        razorpaySignature: dto.razorpaySignature,
-      },
-    });
+    return this.markAsPaid(order.id, dto.razorpayPaymentId, dto.razorpayPaymentId, dto.razorpaySignature);
+  }
 
-    // Reuses the existing stock-confirm + status-transition + live-update logic.
-    return this.markAsPaid(order.id, dto.razorpayPaymentId);
+  /**
+   * Razorpay calls this server-to-server the moment a payment is captured.
+   * This is the source of truth for marking an order PAID - independent of
+   * whether the customer's browser ever completes the /verify call above
+   * (tab closed, network dropped, app backgrounded). Idempotent: repeated
+   * deliveries of the same event (Razorpay retries on anything but a 2xx)
+   * just find the order already PAID and acknowledge without reprocessing.
+   */
+  async handleRazorpayWebhook(rawBody: Buffer, signature: string) {
+    if (!process.env.RAZORPAY_WEBHOOK_SECRET) {
+      throw new BadRequestException('Webhook secret not configured on the server');
+    }
+    if (!signature) {
+      throw new BadRequestException('Missing webhook signature');
+    }
+    if (!Buffer.isBuffer(rawBody)) {
+      throw new BadRequestException('Raw body not available for signature verification');
+    }
+
+    const expected = crypto
+      .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET)
+      .update(rawBody)
+      .digest('hex');
+
+    const expectedBuf = Buffer.from(expected, 'hex');
+    const providedBuf = Buffer.from(signature, 'hex');
+    const signatureValid =
+      expectedBuf.length === providedBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, providedBuf);
+
+    if (!signatureValid) {
+      throw new BadRequestException('Invalid webhook signature');
+    }
+
+    let event: any;
+    try {
+      event = JSON.parse(rawBody.toString('utf8'));
+    } catch {
+      throw new BadRequestException('Malformed webhook payload');
+    }
+
+    if (event?.event !== 'payment.captured') {
+      // Acknowledge everything else so Razorpay stops retrying - we only act on captures.
+      return { received: true, ignored: event?.event ?? 'unknown' };
+    }
+
+    const payment = event.payload?.payment?.entity;
+    const razorpayOrderId = payment?.order_id;
+    const razorpayPaymentId = payment?.id;
+    if (!razorpayOrderId || !razorpayPaymentId) {
+      throw new BadRequestException('Malformed payment.captured payload');
+    }
+
+    const order = await this.prisma.order.findUnique({ where: { razorpayOrderId } });
+    if (!order) {
+      // Nothing to reconcile against - acknowledge so Razorpay doesn't retry forever.
+      return { received: true, matched: false };
+    }
+
+    if (order.status !== OrderStatus.PENDING) {
+      // Already handled - either by /verify already, or a prior webhook delivery.
+      return { received: true, alreadyProcessed: true };
+    }
+
+    await this.markAsPaid(order.id, razorpayPaymentId, razorpayPaymentId);
+    return { received: true, matched: true };
   }
 
   async updateStatus(

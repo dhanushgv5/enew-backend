@@ -6,14 +6,18 @@ import {
   Body,
   Param,
   Query,
+  Req,
+  Headers,
   UseGuards,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto, UpdateOrderAddressDto, UpdateOrderStatusDto, AssignDeliveryDto, UpdateDeliveryStatusDto, VerifyRazorpayPaymentDto } from './dto/order.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { Public } from '../common/decorators/public.decorator';
 import { Role } from '@prisma/client';
 
 @Controller('orders')
@@ -139,5 +143,21 @@ export class OrdersController {
     @Body() dto: VerifyRazorpayPaymentDto,
   ) {
     return this.ordersService.verifyRazorpayPayment(id, userId, dto);
+  }
+
+  // Razorpay calls this server-to-server when a payment is captured. This
+  // is the source of truth for marking an order PAID - independent of
+  // whether the customer's browser ever finishes the /verify call above
+  // (tab closed, network dropped, app backgrounded, etc). Unauthenticated
+  // (Razorpay has no JWT) but gated by HMAC signature verification inside
+  // the service. main.ts registers a raw-body parser for this exact path
+  // so the signature can be checked against the untouched request bytes.
+  @Public()
+  @Post('razorpay/webhook')
+  handleRazorpayWebhook(
+    @Req() req: Request,
+    @Headers('x-razorpay-signature') signature: string,
+  ) {
+    return this.ordersService.handleRazorpayWebhook(req.body as Buffer, signature);
   }
 }
