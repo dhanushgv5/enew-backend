@@ -1,4 +1,4 @@
-import { IsIn, IsObject, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsIn, IsNumber, IsObject, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 
 export class CreateOrderDto {
   @IsObject()
@@ -25,6 +25,13 @@ export class UpdateOrderStatusDto {
   @IsOptional()
   @IsString()
   note?: string;
+
+  // Only meaningful when status === REFUNDED - amount in rupees to actually
+  // refund via Razorpay. Defaults to the full order total if omitted.
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  refundAmount?: number;
 }
 
 // Same shape as CreateOrderDto.shippingAddress - used when a customer

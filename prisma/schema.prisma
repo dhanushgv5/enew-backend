@@ -145,6 +145,7 @@ model Order {
   razorpayOrderId   String?  @unique
   razorpayPaymentId String?  @unique
   razorpaySignature String?
+  razorpayRefundId  String?
   deliveryBoyId   String?
   deliveryBoy     User?       @relation("DeliveryAssignments", fields: [deliveryBoyId], references: [id])
   items           OrderItem[]
@@ -238,6 +239,7 @@ model ReturnRequest {
   status        ReturnStatus @default(REQUESTED)
   adminNote     String?
   refundAmount  Decimal?     @db.Decimal(10, 2)
+  razorpayRefundId String?
   // Set together when admin schedules the pickup (APPROVED -> PICKUP_SCHEDULED)
   pickupDate    DateTime?
   deliveryBoyId String?

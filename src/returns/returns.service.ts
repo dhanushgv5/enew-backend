@@ -7,6 +7,7 @@ import {
 import { OrderStatus, Prisma, ReturnStatus, ReturnType, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../websocket/events.gateway';
+import { OrdersService } from '../orders/orders.service';
 import {
   CreateReturnRequestDto,
   QueryReturnsDto,
@@ -63,6 +64,7 @@ export class ReturnsService {
   constructor(
     private prisma: PrismaService,
     private eventsGateway: EventsGateway,
+    private ordersService: OrdersService,
   ) {}
 
   async create(userId: string, dto: CreateReturnRequestDto) {
@@ -231,6 +233,19 @@ export class ReturnsService {
       throw new BadRequestException('Only REPLACEMENT requests can be marked REPLACED');
     }
 
+    // Refunding actually moves money, so it happens first and outside the
+    // DB transaction below - this return is only ever written as REFUNDED
+    // if Razorpay confirms the refund succeeded. Previously this just set
+    // a status label with no real refund behind it.
+    let refundRazorpayId: string | undefined;
+    if (nextStatus === ReturnStatus.REFUNDED) {
+      const amount = dto.refundAmount ?? Number(request.orderItem.price) * request.quantity;
+      const refund = await this.ordersService.refundPayment(request.orderId, amount, {
+        returnRequestId: request.id,
+      });
+      refundRazorpayId = refund.id;
+    }
+
     const updated = await this.prisma.$transaction(async (tx) => {
       // A replacement unit ships out to the customer - take it back out of stock.
       if (nextStatus === ReturnStatus.REPLACED) {
@@ -251,6 +266,7 @@ export class ReturnsService {
           status: nextStatus,
           adminNote: dto.note,
           ...(refundAmount !== undefined && { refundAmount }),
+          ...(refundRazorpayId && { razorpayRefundId: refundRazorpayId }),
           statusHistory: {
             create: { status: nextStatus, note: dto.note },
           },

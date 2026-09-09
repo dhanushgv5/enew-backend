@@ -409,6 +409,36 @@ export class OrdersService {
     return { received: true, matched: true };
   }
 
+  /**
+   * Issues a real refund via Razorpay's API against the payment on file for
+   * this order. Called before any DB write that marks something REFUNDED -
+   * callers must not write a REFUNDED status unless this succeeds, since
+   * that would otherwise be a label with no actual money movement behind
+   * it. Returns Razorpay's refund object (id, amount, status).
+   */
+  async refundPayment(orderId: string, amountRupees: number, notes?: Record<string, string>) {
+    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!order.razorpayPaymentId) {
+      throw new BadRequestException(
+        'This order has no associated Razorpay payment to refund (it may have been paid outside Razorpay, or never actually paid)',
+      );
+    }
+
+    const amountPaise = Math.round(amountRupees * 100);
+    if (amountPaise <= 0) {
+      throw new BadRequestException('Refund amount must be greater than zero');
+    }
+
+    const refund = await this.getRazorpay().payments.refund(order.razorpayPaymentId, {
+      amount: amountPaise,
+      speed: 'normal',
+      notes: { orderId: order.id, orderNumber: order.orderNumber, ...notes },
+    });
+
+    return refund;
+  }
+
   async updateStatus(
     orderId: string,
     dto: UpdateOrderStatusDto,
@@ -441,6 +471,22 @@ export class OrdersService {
       throw new BadRequestException(
         `Cannot transition from ${order.status} to ${dto.status}`,
       );
+    }
+
+    // Refunding actually moves money, so it happens first and outside the
+    // DB transaction below - the order is only ever written as REFUNDED if
+    // Razorpay confirms the refund succeeded. This intentionally does not
+    // touch stock: whether a refunded order's items physically come back
+    // into stock is a separate decision (handled by the return-request
+    // flow when an item is actually received back) - a refund alone
+    // doesn't imply that.
+    let refundResult: { id: string } | undefined;
+    if (dto.status === OrderStatus.REFUNDED) {
+      const refundAmount = dto.refundAmount ?? Number(order.total);
+      if (refundAmount > Number(order.total)) {
+        throw new BadRequestException('Refund amount cannot exceed the order total');
+      }
+      refundResult = await this.refundPayment(orderId, refundAmount, { note: dto.note ?? '' });
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -477,6 +523,7 @@ export class OrdersService {
         data: {
           status: dto.status as OrderStatus,
           ...(dto.status === OrderStatus.DELIVERED && { deliveredAt: new Date() }),
+          ...(refundResult && { razorpayRefundId: refundResult.id }),
           statusHistory: {
             create: {
               status: dto.status as OrderStatus,
